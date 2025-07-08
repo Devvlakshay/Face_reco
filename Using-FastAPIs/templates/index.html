@@ -1,0 +1,170 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Facial Duplicate Detector</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f2f5;
+        }
+        #video-container {
+            position: relative;
+            border: 2px solid #ccc;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        video {
+            display: block;
+            transform: scaleX(-1); /* Mirror view */
+        }
+        #capture-btn {
+            margin-top: 20px;
+            padding: 12px 25px;
+            font-size: 16px;
+            font-weight: bold;
+            color: white;
+            background-color: #007bff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        #capture-btn:disabled {
+            background-color: #aaa;
+            cursor: not-allowed;
+        }
+        #capture-btn:hover:not(:disabled) {
+            background-color: #0056b3;
+        }
+        #result-container {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            width: 80%;
+            max-width: 600px;
+            text-align: center;
+            font-size: 1.1em;
+            visibility: visible;
+            box-sizing: border-box;
+        }
+        .info {
+            background-color: #e2e3e5;
+            color: #383d41;
+            border: 1px solid #d6d8db;
+            visibility: visible;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+            visibility: visible;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+            visibility: visible;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>🧠 Facial Duplicate Detector</h1>
+    <div id="video-container">
+        <video id="video" width="600" height="450" autoplay playsinline></video>
+    </div>
+    <canvas id="canvas" style="display:none;"></canvas>
+    <button id="capture-btn">Capture & Check</button>
+    <div id="result-container" style="visibility:visible;"></div>
+
+    <script>
+        const video = document.getElementById('video');
+        const captureBtn = document.getElementById('capture-btn');
+        const canvas = document.getElementById('canvas');
+        const resultContainer = document.getElementById('result-container');
+
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+            } catch (err) {
+                console.error("Error accessing camera: ", err);
+                showResult('Error: Could not access camera. Please grant permission.', 'error');
+                captureBtn.disabled = true;
+            }
+        }
+
+        captureBtn.addEventListener('click', () => {
+            captureBtn.disabled = true;
+            showResult('Capturing and analyzing...', 'info');
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const context = canvas.getContext('2d');
+            context.translate(canvas.width, 0); 
+            context.scale(-1, 1);
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            canvas.toBlob(async (blob) => {
+                const formData = new FormData();
+                formData.append('file', blob, 'capture.jpg');
+
+                try {
+                    const response = await fetch('/check-face/', {
+                        method: 'POST',
+                        body: formData,
+                    });
+                    
+                    const result = await response.json();
+
+                    if (!response.ok) {
+                        throw new Error(result.error || `HTTP error! Status: ${response.status}`);
+                    }
+                    
+                    handleApiResponse(result);
+
+                } catch (error) {
+                    console.error('Error sending image:', error);
+                    showResult(`<strong>Error:</strong> ${error.message}`, 'error');
+                } finally {
+                    captureBtn.disabled = false;
+                    captureBtn.textContent = 'Capture & Check';
+                }
+            }, 'image/jpeg');
+        });
+
+        function handleApiResponse(result) {
+            if (result.status === 'duplicate_found') {
+                const message = `<strong>Duplicate Found!</strong><br>
+                                 Matched with image: <strong>${result.matched_image}</strong><br>
+                                 Similarity Score: ${result.score.toFixed(4)} (Threshold: ${result.threshold})`;
+                showResult(message, 'error');
+            } else if (result.status === 'new_face_registered') {
+                const message = `<strong>New Face Registered!</strong><br>
+                                 Image saved as: <strong>${result.filename}</strong>`;
+                showResult(message, 'success');
+            } else {
+                 showResult(`<strong>Unknown Response:</strong> ${JSON.stringify(result)}`, 'error');
+            }
+        }
+        
+        function showResult(message, type) {
+            resultContainer.innerHTML = message;
+            resultContainer.className = `${type}`;
+            resultContainer.style.visibility = 'visible';
+        }
+        
+        startCamera();
+    </script>
+</body>
+</html>
