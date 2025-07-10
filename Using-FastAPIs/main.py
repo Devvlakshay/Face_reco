@@ -17,6 +17,12 @@ from fastapi.staticfiles import StaticFiles
 import face_recognition
 from deepface import DeepFace
 
+from pydantic import BaseModel, HttpUrl
+import requests
+
+class ImageURLRequest(BaseModel):
+    image_url: HttpUrl
+
 # ---------------------- Config ----------------------
 UPLOADS_DIR = "uploads"
 EMBEDDING_FILE = "user_embeddings.pkl"
@@ -91,7 +97,7 @@ async def get_root(request: Request):
     response.headers["Expires"] = "0"
     return response
 
-@app.post("/check-face/")
+@app.post("/check-face")
 async def check_face(file: UploadFile = File(...)):
     try:
         image_bytes = await file.read()
@@ -128,5 +134,50 @@ async def check_face(file: UploadFile = File(...)):
         "threshold": SIMILARITY_THRESHOLD
     })
 
+@app.post("/check-face-url")
+async def check_face_url(request: ImageURLRequest):
+    try:
+        # Download the image from URL
+        response = requests.get(request.image_url)
+        if response.status_code != 200:
+            return JSONResponse(status_code=400, content={"error": "Failed to download image from URL."})
+        image_bytes = response.content
+
+        # Generate embedding
+        new_embedding = get_embedding_from_bytes(image_bytes)
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Could not process image from URL: {e}"}
+        )
+
+    df = load_embeddings()
+    result = find_duplicate(new_embedding, df)
+
+    if result.get("duplicate"):
+        return JSONResponse(content={
+            "status": "duplicate_found",
+            "matched_image": result["matched_user_id"],
+            "score": result["score"],
+            "threshold": SIMILARITY_THRESHOLD
+        })
+
+    # Save new image and embedding
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+    save_path = os.path.join(UPLOADS_DIR, filename)
+    with open(save_path, "wb") as f:
+        f.write(image_bytes)
+
+    new_row = pd.DataFrame([{"user_id": filename, "embedding": new_embedding}])
+    df = pd.concat([df, new_row], ignore_index=True)
+    save_embeddings(df)
+
+    return JSONResponse(content={
+        "status": "new_face_registered",
+        "filename": filename,
+        "threshold": SIMILARITY_THRESHOLD
+    })
+
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8100, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8100, reload=True)
+
