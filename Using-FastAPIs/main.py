@@ -21,7 +21,9 @@ from pydantic import BaseModel, HttpUrl
 import requests
 
 class ImageURLRequest(BaseModel):
+    user_id: str
     image_url: HttpUrl
+
 
 # ---------------------- Config ----------------------
 UPLOADS_DIR = "uploads"
@@ -157,26 +159,28 @@ async def check_face_url(request: ImageURLRequest):
     if result.get("duplicate"):
         return JSONResponse(content={
             "status": "duplicate_found",
-            "matched_image": result["matched_user_id"],
+            "matched_user_id": result["matched_user_id"],
             "score": result["score"],
             "threshold": SIMILARITY_THRESHOLD
         })
 
-    # Save new image and embedding
-    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+    # Save new image and embedding with provided user_id
+    filename = f"{request.user_id}.jpg"
     save_path = os.path.join(UPLOADS_DIR, filename)
     with open(save_path, "wb") as f:
         f.write(image_bytes)
 
-    new_row = pd.DataFrame([{"user_id": filename, "embedding": new_embedding}])
+    new_row = pd.DataFrame([{"user_id": request.user_id, "embedding": new_embedding}])
     df = pd.concat([df, new_row], ignore_index=True)
     save_embeddings(df)
 
     return JSONResponse(content={
         "status": "new_face_registered",
         "filename": filename,
+        "user_id": request.user_id,
         "threshold": SIMILARITY_THRESHOLD
     })
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8100, reload=True)
