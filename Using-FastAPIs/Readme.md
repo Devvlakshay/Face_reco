@@ -53,8 +53,8 @@ Follow these steps to set up and run the project locally.
 ### 2. Clone the Repository
 
 ```bash
-git clone <your-repository-url>
-cd face-recognition-api
+git clone https://github.com/Devvlakshay/Face_reco/blob/main/Using-FastAPIs/
+cd Using-FastAPIs
 ```
 
 ### 3. Set Up a Virtual Environment
