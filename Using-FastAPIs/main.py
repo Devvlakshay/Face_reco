@@ -487,3 +487,13 @@ async def startup_event():
     logger.info("Face Recognition API starting up...")
     logger.info(f"Model: {config.MODEL_NAME}, Primary Detector: {config.PRIMARY_DETECTOR}")
     logger.info(f"User Similarity: {config.USER_SIMILARITY_THRESHOLD}, Blur Threshold: {config.BLUR_THRESHOLD}")
+    
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=8100, 
+        reload=True,
+        log_level="info"
+    )
