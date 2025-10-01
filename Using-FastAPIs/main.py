@@ -1,4 +1,4 @@
-
+#main.py
 import logging
 from datetime import datetime
 import requests
@@ -19,12 +19,13 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Modular Face Recognition API",
     description="An accurate API with a standardized JSON response structure.",
-    version="3.0.0" # Version bump for new response structure
+    version="3.1.0" # Version bump for name support
 )
 
-# --- Pydantic Models for URL requests (no changes here) ---
+# --- Pydantic Models for URL requests ---
 class ImageURLRequest(BaseModel):
     user_id: str
+    name: str
     image_url: HttpUrl
 
 class EmployeeURLRequest(BaseModel):
@@ -32,7 +33,7 @@ class EmployeeURLRequest(BaseModel):
     employee_name: str
     image_url: HttpUrl
 
-# --- Helper to download image (no changes here) ---
+# --- Helper to download image ---
 def download_image(url: HttpUrl) -> bytes:
     try:
         response = requests.get(str(url), timeout=15)
@@ -44,123 +45,169 @@ def download_image(url: HttpUrl) -> bytes:
 
 # --- Main Endpoints (User) ---
 @app.post("/check-face-file")
-async def check_face_file(user_id: str = Form(...), file: UploadFile = File(...)):
+async def check_face_file(user_id: str = Form(...), name: str = Form(...), file: UploadFile = File(...)):
     """Checks face from file, blocks employees, finds duplicates, and registers new users."""
     image_bytes = await file.read()
-    return await process_face_check(user_id, image_bytes)
+    return await process_face_check(user_id, name, image_bytes)
 
 @app.post("/check-face-url")
 async def check_face_url(request: ImageURLRequest):
     """Checks face from URL, blocks employees, finds duplicates, and registers new users."""
     image_bytes = download_image(request.image_url)
-    return await process_face_check(request.user_id, image_bytes)
+    return await process_face_check(request.user_id, request.name, image_bytes)
 
-async def process_face_check(user_id: str, image_bytes: bytes):
-    """Core logic for face checking and registration with the new response structure."""
+# Updated sections for main.py
+
+from face_processor import BlurryImageError, MultipleFacesError
+
+async def process_face_check(user_id: str, name: str, image_bytes: bytes):
+    """Core logic for face checking and registration with multiple face handling."""
     start_time = datetime.now()
     try:
         embedding = face_processor.get_embedding(image_bytes)
     
+        # Block employee faces
+        if (employee_match := db.check_is_employee(embedding)):
+            return JSONResponse(
+                status_code=403, # Forbidden
+                content={
+                    "success": True,
+                    "data": {
+                        "matched_id": employee_match.get("employee_id", ""),
+                        "name": employee_match.get("employee_name", ""),
+                    },
+                    "message": "employee_face_detected"
+                }
+            )
+
+        # Find duplicate users
+        if (duplicate := db.find_duplicate_user(embedding)):
+            # Load user data to get the name of the duplicate user
+            user_df = db.load_user_embeddings()
+            duplicate_name = ""
+            if not user_df.empty:
+                duplicate_row = user_df[user_df["user_id"] == duplicate.get("matched_user_id", "")]
+                if not duplicate_row.empty:
+                    duplicate_name = duplicate_row.iloc[0].get("name", "")
+            
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "success": True,
+                    "data": {
+                        "matched_id": duplicate.get("matched_user_id", ""),
+                        "name": duplicate_name,
+                        "similarity_score": round(duplicate.get("score", 0), 3)
+                    },
+                    "message": "duplicate_face_found"
+                }
+            )
+        
+        # Register new user
+        user_df = db.load_user_embeddings()
+        new_row = pd.DataFrame([{"user_id": user_id, "name": name, "embedding": embedding}])
+        user_df = pd.concat([user_df, new_row], ignore_index=True)
+        db.save_user_embeddings(user_df)
+
+        processing_time = (datetime.now() - start_time).total_seconds()
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "data": {
+                    "user_id": user_id,
+                    "name": name,
+                },
+                "message": "new_face_registered"
+            }
+        )
+    
+    except MultipleFacesError as e:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "data": {
+                    "face_count": e.face_count,
+                    # "faces_detected": e.faces_info,
+                    # "total_faces": len(e.faces_info) if hasattr(e, 'faces_info') else e.face_count
+                },
+                "message": "multiple_faces_detected"
+            }
+        )
     except BlurryImageError as e:
         return JSONResponse(
             status_code=400,
             content={
-                "status": False,
-                "user_id": user_id,
-                "data": {"blur_score": round(e.score, 2)},
+                "success": False,
+                "data": {
+                    "blur_score": round(e.score, 2),
+                    "threshold": config.BLUR_THRESHOLD
+                },
                 "message": "blur_image_detected"
             }
         )
     except ValueError as e:
-        # Distinguish between "no face" and other processing errors for a better message
-        error_message = "no_face_detected" if "No_face_detected" in str(e) else "image_processing_error"
+        # Distinguish between different error types
+        if "No face detected" in str(e):
+            error_message = "no_face_detected"
+        elif "No prominent face detected" in str(e):
+            error_message = "no_prominent_face_detected"
+        else:
+            error_message = "image_processing_error"
+            
         return JSONResponse(
             status_code=400,
             content={
-                "status": False,
-                "user_id": user_id,
-                "data": {"details": ""},
+                "success": False,
+                "data": {},
                 "message": error_message
             }
         )
 
-    # Block employee faces
-    if (employee_match := db.check_is_employee(embedding)):
-        return JSONResponse(
-            status_code=403, # Forbidden
-            content={
-                "status": False,
-                # "user_id": user_id
-                "data": employee_match,
-                "message": "employee_face_detected"
-            }
-        )
-
-    # Find duplicate users
-    if (duplicate := db.find_duplicate_user(embedding)):
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": True,
-                # "user_id": user_id,
-                "data": duplicate,
-                "message": "duplicate_face_found"
-            }
-        )
-    
-    # Register new user
-    user_df = db.load_user_embeddings()
-    new_row = pd.DataFrame([{"user_id": user_id, "embedding": embedding}])
-    user_df = pd.concat([user_df, new_row], ignore_index=True)
-    db.save_user_embeddings(user_df)
-
-    processing_time = (datetime.now() - start_time).total_seconds()
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": True,
-            "user_id": user_id,
-            "data": {"processing_time_seconds": round(processing_time, 2)},
-            "message": "new_face_registered"
-        }
-    )
-
-# --- Employee Registration ---
-@app.post("/register-employee")
-async def register_employee(request: EmployeeURLRequest):
-    """Registers an employee face from a URL."""
-    image_bytes = download_image(request.image_url)
-    return await process_employee_registration(request.employee_id, request.employee_name, image_bytes)
-
-@app.post("/register-employee-file")
-async def register_employee_file(employee_id: str = Form(...), employee_name: str = Form(...), file: UploadFile = File(...)):
-    """Registers an employee face from a file."""
-    image_bytes = await file.read()
-    return await process_employee_registration(employee_id, employee_name, image_bytes)
-
 async def process_employee_registration(employee_id: str, employee_name: str, image_bytes: bytes):
-    """Core logic for employee registration with the new response structure."""
+    """Core logic for employee registration with multiple face handling."""
     try:
         embedding = face_processor.get_embedding(image_bytes)
     
+    except MultipleFacesError as e:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "data": {
+                    # "face_count": e.face_count,
+                    # "faces_detected": e.faces_info,
+                    "total_faces": len(e.faces_info) if hasattr(e, 'faces_info') else e.face_count
+                },
+                "message": "multiple_faces_detected"
+            }
+        )
     except BlurryImageError as e:
         return JSONResponse(
             status_code=400,
             content={
-                "status": False,
-                "employee_id": employee_id,
-                "data": {"blur_score": round(e.score, 2)},
+                "success": False,
+                "data": {
+                    "blur_score": round(e.score, 2),
+                    "threshold": config.BLUR_THRESHOLD
+                },
                 "message": "blur_image_detected"
             }
         )
     except ValueError as e:
-        error_message = "no_face_detected" if "No face detected" in str(e) else "image_processing_error"
+        if "No face detected" in str(e):
+            error_message = "no_face_detected"
+        elif "No prominent face detected" in str(e):
+            error_message = "no_prominent_face_detected"
+        else:
+            error_message = "image_processing_error"
+            
         return JSONResponse(
             status_code=400,
             content={
-                "status": False,
-                "employee_id": employee_id,
-                "data": {"details": ""},
+                "success": False,
+                "data": {},
                 "message": error_message
             }
         )
@@ -170,9 +217,11 @@ async def process_employee_registration(employee_id: str, employee_name: str, im
         return JSONResponse(
             status_code=409, # Conflict
             content={
-                "status": False,
-                "employee_id": employee_id,
-                "data": {},
+                "success": False,
+                "data": {
+                    "employee_id": employee_id,
+                    "employee_name": employee_name
+                },
                 "message": "employee_already_exists"
             }
         )
@@ -184,14 +233,15 @@ async def process_employee_registration(employee_id: str, employee_name: str, im
     return JSONResponse(
         status_code=200,
         content={
-            "status": True,
-            "employee_id": employee_id,
-            "data": {"employee_name": employee_name},
+            "success": True,
+            "data": {
+                "employee_id": employee_id,
+                "employee_name": employee_name
+            },
             "message": "employee_registered_successfully"
         }
     )
 
-# --- Management Endpoints ---
 @app.get("/employees")
 async def list_employees():
     """Lists all registered employees."""
@@ -201,9 +251,27 @@ async def list_employees():
         employee_list = df[["employee_id", "employee_name"]].to_dict(orient="records")
     
     return {
-        "status": True,
-        "data": {"employees": employee_list},
+        "success": True,
+        "data": {
+            "employees": employee_list,
+        },
         "message": "employees_retrieved_successfully"
+    }
+
+@app.get("/users")
+async def list_users():
+    """Lists all registered users."""
+    df = db.load_user_embeddings()
+    user_list = []
+    if not df.empty:
+        user_list = df[["user_id", "name"]].to_dict(orient="records")
+    
+    return {
+        "success": True,
+        "data": {
+            "users": user_list,
+        },
+        "message": "users_retrieved_successfully"
     }
 
 @app.delete("/employee/{employee_id}")
@@ -214,19 +282,25 @@ async def remove_employee(employee_id: str):
         return JSONResponse(
             status_code=404,
             content={
-                "status": False,
-                "employee_id": employee_id,
-                "data": {},
+                "success": False,
+                "data": {
+                    "employee_id": employee_id
+                },
                 "message": "employee_not_found"
             }
         )
     
+    # Get employee name before deletion
+    employee_name = df[df["employee_id"] == employee_id].iloc[0]["employee_name"]
+    
     updated_df = df[df["employee_id"] != employee_id]
     db.save_employee_embeddings(updated_df)
     return {
-        "status": True,
-        "employee_id": employee_id,
-        "data": {},
+        "success": True,
+        "data": {
+            "employee_id": employee_id,
+            "employee_name": employee_name
+        },
         "message": "employee_removed_successfully"
     }
 
@@ -238,23 +312,29 @@ async def remove_user(user_id: str):
         return JSONResponse(
             status_code=404,
             content={
-                "status": False,
-                "user_id": user_id,
-                "data": {},
+                "success": False,
+                "data": {
+                    "user_id": user_id
+                },
                 "message": "user_not_found"
             }
         )
 
+    # Get user name before deletion
+    name = df[df["user_id"] == user_id].iloc[0]["name"]
+    
     updated_df = df[df["user_id"] != user_id]
     db.save_user_embeddings(updated_df)
     return {
-        "status": True,
-        "user_id": user_id,
-        "data": {},
+        "success": True,
+        "data": {
+            "user_id": user_id,
+            "name": name
+        },
         "message": "user_removed_successfully"
     }
 
-# --- Startup Event (no changes here) ---
+# --- Startup Event ---
 @app.on_event("startup")
 async def startup_event():
     logger.info("Face Recognition API starting up...")
@@ -267,7 +347,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app", 
         host="0.0.0.0", 
-        port=8100, 
+        port=8102, 
         reload=True,
         log_level="info"
     )
